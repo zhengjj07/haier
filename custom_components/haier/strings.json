@@ -1,0 +1,106 @@
+{
+    "config": {
+        "error": {
+            "auth_error": "Authentication failed: {reason}"
+        },
+        "step": {
+            "user": {
+                "title": "Connect Haier",
+                "description": "Choose a sign-in method.",
+                "menu_options": {
+                    "phone_login": "Sign in by automatically getting a token with your account and password (recommended)",
+                    "manual": "Sign in with a manually entered token (advanced)"
+                }
+            },
+            "manual": {
+                "data": {
+                    "client_id": "Client Id",
+                    "refresh_token": "Refresh Token",
+                    "app_source": "Token source"
+                },
+                "description": "Enter your Client ID and a valid refresh token.",
+                "title": "Connect Haier"
+            },
+            "phone_login": {
+                "title": "Connect Haier",
+                "description": "Enter your Haier Smart Home account phone number and password. Your password is used only for this sign-in and is not saved to Home Assistant.",
+                "data": {
+                    "phone": "Phone number",
+                    "password": "Password"
+                }
+            }
+        }
+    },
+    "options": {
+        "error": {
+            "auth_error": "Authentication failed: {reason}"
+        },
+        "step": {
+            "init": {
+                "menu_options": {
+                    "account": "Update account",
+                    "device": "Device Filter",
+                    "entity_device_selector": "Entity Filter",
+                    "preferences": "Preferences"
+                }
+            },
+            "account": {
+                "title": "Update account",
+                "description": "Choose a sign-in method.",
+                "menu_options": {
+                    "account_phone_login": "Sign in by automatically getting a token with your account and password (recommended)",
+                    "account_manual": "Sign in with a manually entered token (advanced)"
+                }
+            },
+            "account_phone_login": {
+                "title": "Update account",
+                "description": "Enter your Haier Smart Home account phone number and password. Your password is used only for this sign-in and is not saved to Home Assistant.",
+                "data": {
+                    "phone": "Phone number",
+                    "password": "Password"
+                }
+            },
+            "account_manual": {
+                "title": "Update account",
+                "description": "Enter your Client ID and a valid refresh token.",
+                "data": {
+                    "client_id": "Client Id",
+                    "refresh_token": "Refresh Token",
+                    "app_source": "Token source"
+                }
+            },
+            "preferences": {
+                "title": "Preferences",
+                "description": "Configure common integration options.",
+                "data": {
+                    "default_load_all_entity": "Load all entities by default",
+                    "ignore_device_offline": "Ignore offline device status (keep the last state while offline)"
+                }
+            },
+            "device": {
+                "title": "Device Filter",
+                "description": "过滤方式为Exclude时，设备列表中已勾选的设备将不会接入；过滤方式为Include时则只接入设备列表中已勾选的设备",
+                "data": {
+                    "filter_method": "Filter method",
+                    "target_devices": "Device List"
+                }
+            },
+            "entity_device_selector": {
+                "title": "Select Device",
+                "description": "Please select the device to be operated",
+                "data": {
+                    "target_device": "Target Device"
+                }
+            },
+            "entity_filter": {
+                "title": "Entity Filter",
+                "description": "过滤方式为Exclude时，设备列表中已勾选的设备将不会接入；过滤方式为Include时则只接入设备列表中已勾选的设备",
+                "data": {
+                    "device_id": "Target device（do not modify）",
+                    "filter_method": "Filter method",
+                    "target_entities": "Entities"
+                }
+            }
+        }
+    }
+}
