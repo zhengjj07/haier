@@ -6,10 +6,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.const import Platform, UnitOfTemperature, PERCENTAGE, UnitOfVolume, UnitOfEnergy
 
-try:
-    from .helpers import equals_ignore_case, contains_any_ignore_case, _normalize_cmd_value
-except ImportError:
-    from haier.helpers import equals_ignore_case, contains_any_ignore_case, _normalize_cmd_value
+from custom_components.haier.helpers import equals_ignore_case, contains_any_ignore_case
 
 _LOGGER = logging.getLogger(__name__)
 
