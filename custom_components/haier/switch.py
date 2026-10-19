@@ -36,11 +36,25 @@ class HaierSwitch(HaierAbstractEntity, SwitchEntity):
 
     def _update_value(self):
         data_key = self._attribute.ext.get('data_key', self._attribute.key)
+        if data_key not in self._attributes_data:
+            # 设备云端暂时没有下发这个字段的值（如四季温水/自动关机在部分机型
+            # 上默认不推送 value），默认视为"关"且维持可用状态，避免整个实体
+            # 显示为 unavailable、看起来像没生成。
+            self._attr_is_on = False
+            self._attr_available = True
+            _LOGGER.debug(
+                'entity [%s] attribute %s not in snapshot, default to OFF',
+                self._attr_unique_id, data_key
+            )
+            return
         try:
             self._attr_is_on = try_read_as_bool(self._attributes_data[data_key])
-        except (ValueError, KeyError):
+        except (ValueError, TypeError):
             _LOGGER.exception('entity [{}] read value failed'.format(self._attr_unique_id))
-            self._attr_available = False
+            self._attr_is_on = False
+            self._attr_available = True
+            return
+        self._attr_available = True
 
     def turn_on(self, **kwargs: Any) -> None:
         self._send_command({

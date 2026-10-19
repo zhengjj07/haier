@@ -19,6 +19,7 @@ _INVALID_MODE_DESCS = ('未设置', '无', '关', '关闭', '关机', '停止', 
 _WATER_HEATER_BOOL_FEATURES = [
     ('season_temp', '四季温水', ['四季温水', '四季恒温', '四季温感']),
     ('auto_off', '自动关机', ['自动关机', '自动断电', '加热完成自动', '加热完成后自动']),
+    ('mid_temp_keep', '中温保温', ['中温保温']),
 ]
 
 # 预约时段数量上限（覆盖预约1 ~ 预约N）
@@ -94,18 +95,18 @@ class HaierAttributeParser(ABC):
 class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
     def parse_attribute(self, attribute: dict) -> HaierAttribute:
+        # —— 热水器增强字段黑名单（必须放在 'value' not in attribute 判断之前）：
+        # 有些字段（如四季温水、自动关机）在部分机型上云端根本不下发 value 字段，
+        # 只有描述，此时后面的增强逻辑（parse_global）会为它们单独生成可操作实体。
+        # 这里直接跳过默认的只读副本，避免 HA 里出现残缺的 binary_sensor。
+        if self._is_water_heater_forced_writable(attribute):
+            return None
+
         # 没有value的attribute后续无法正常使用，所以需要过滤掉
         if 'value' not in attribute:
             return None
 
-        # —— 热水器增强字段黑名单：这些字段虽然被云端标记为 writable=false
-        # 或为STEP只读，但实际可以下发命令，后面 parse_global 会专门为它们
-        # 生成可写的 Switch/Number/Button 实体。这里跳过只读副本，避免 HA
-        # 里出现同名但不可操作的"双胞胎"实体。
-        if not attribute['writable'] and attribute['readable']:
-            if self._is_water_heater_forced_writable(attribute):
-                return None
-
+        # 只读属性 → 按 sensor / binary_sensor 处理
         if not attribute['writable'] and attribute['readable']:
             return self._parse_as_sensor(attribute)
 
@@ -136,6 +137,26 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         # 判断是不是热水器（用于后续增强实体判断）
         is_water_heater = any(key in all_attribute_keys for key in
                               ('targetTemp', 'targetTemperature')) and 'onOffStatus' in all_attribute_keys
+
+        # —— 热水器全属性 dump（debug）：当开启 haier debug 日志时，
+        # 会打印该热水器数字模型里每一个属性的 name / desc / writable /
+        # readable / value / valueRange 类型，方便排查"某个功能为何没有出现"。
+        if is_water_heater and _LOGGER.isEnabledFor(logging.DEBUG):
+            device_id_marker = attributes[0].get('deviceId', '') if attributes else ''
+            _LOGGER.debug('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
+            for a in attributes:
+                name = a.get('name', '')
+                desc = a.get('desc', '')
+                writable = a.get('writable')
+                readable = a.get('readable')
+                value = a.get('value', '<no value>')
+                vr = a.get('valueRange', {})
+                vr_type = vr.get('type', '') if vr else ''
+                _LOGGER.debug(
+                    '  attr: name=%-30s desc=%-20s writable=%s readable=%s value=%s rangeType=%s',
+                    name, desc, writable, readable, value, vr_type
+                )
+            _LOGGER.debug('=== End attribute dump ===')
 
         # 空调特征字段
         climate_feature_fields = [
@@ -237,14 +258,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             # 有 dataList 的情况：取两项
             if equals_ignore_case(vr.get('type'), 'LIST') and 'dataList' in vr:
                 items = vr['dataList']
-                true_data, false_data = True, False
+                true_data, false_data = 1, 0
                 for it in items:
-                    d = str(it.get('data', ''))
+                    d = it.get('data')
                     desc = str(it.get('desc', ''))
-                    if d.lower() in ('true', '1', '开', '开启') or '开' in desc or '启用' in desc:
-                        true_data = it['data']
-                    if d.lower() in ('false', '0', '关', '关闭') or '关' in desc or '禁用' in desc:
-                        false_data = it['data']
+                    d_str = str(d)
+                    if d_str.lower() in ('true', '1', '开', '开启') or '开' in desc or '启用' in desc:
+                        true_data = d
+                    if d_str.lower() in ('false', '0', '关', '关闭') or '关' in desc or '禁用' in desc:
+                        false_data = d
                 return true_data, false_data
             # 否则根据当前值类型推断
             if isinstance(raw, bool):
@@ -256,7 +278,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     return '1', '0'
                 if raw.lower() in ('true', 'false'):
                     return 'true', 'false'
-            return True, False
+            # 字段没有 value（如部分机型的四季温水/自动关机），也没有 dataList，
+            # 海尔电热水器的二元功能普遍用 1/0 控制，默认用 1/0 比 True/False 更兼容。
+            return 1, 0
 
         def _yield_switch(attr, entity_key, display_name):
             on_v, off_v = _on_off_values(attr)
