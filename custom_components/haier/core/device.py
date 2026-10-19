@@ -50,6 +50,11 @@ class HaierDevice:
         try:
             parser = V1SpecAttributeParser()
             attributes = await self._client.get_digital_model_from_cache(self)
+
+            # 便于排查某机型缺失/异常的实体：记录该设备全部属性的名称与描述
+            _LOGGER.debug('Haier device %s attribute dump: %s', self.id,
+                          [(a.get('name'), a.get('desc')) for a in attributes])
+
             for item in attributes:
                 try:
                     attr = parser.parse_attribute(item)
@@ -62,6 +67,14 @@ class HaierDevice:
             if iter:
                 for item in iter:
                     self._attributes.append(item)
+
+            # 热水器辅助功能实体生成后，移除同一属性的只读副本，避免出现同名实体
+            extra_keys = {attr.key for attr in self._attributes if attr.key.endswith('_extra')}
+            if extra_keys:
+                self._attributes = [
+                    attr for attr in self._attributes
+                    if attr.key.endswith('_extra') or attr.key + '_extra' not in extra_keys
+                ]
         except Exception:
             _LOGGER.exception('Haier device %s init failed', self.id)
 

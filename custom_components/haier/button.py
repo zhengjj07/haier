@@ -35,6 +35,7 @@ class HaierButton(HaierAbstractEntity, ButtonEntity):
         return None
 
     def press(self, **kwargs: Any) -> None:
+        data_key = self._attribute.ext.get('data_key', self._attribute.key)
         self._send_command({
-            self._attribute.key: self._attribute.ext['command_value']
+            data_key: self._attribute.ext['command_value']
         })

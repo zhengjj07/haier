@@ -15,7 +15,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 
 from . import async_register_entity
-from .core.attribute import HaierAttribute
+from .core.attribute import HaierAttribute, V1SpecAttributeParser
 from .core.device import HaierDevice
 from .entity import HaierAbstractEntity
 from .helpers import try_read_as_bool
@@ -54,6 +54,7 @@ class HaierWaterHeater(HaierAbstractEntity, WaterHeaterEntity):
         self._power_key = ext.get('power_key', 'onOffStatus')
         self._mode_key = ext.get('mode_key', None)
         self._mode_mapping = ext.get('mode_mapping', None)
+        self._mode_options = ext.get('mode_options', None)
 
         # 构建支持特性
         supported_features = WaterHeaterEntityFeature.TARGET_TEMPERATURE
@@ -75,16 +76,29 @@ class HaierWaterHeater(HaierAbstractEntity, WaterHeaterEntity):
         if self._heater_type == 'gas':
             # 燃气热水器：开机即为燃气加热
             modes.append('gas')
+        elif self._mode_options:
+            # 电热水器/通用：直接使用设备数据里有序、已过滤占位项的中文模式名。
+            # 不能遍历 mode_mapping，因为它是"data<->desc"双向表，
+            # 会把 0/1/2/3 这类原始值和"未设置"一起塞进下拉列表。
+            for mode_desc in self._mode_options:
+                if mode_desc not in modes:
+                    modes.append(mode_desc)
         elif self._mode_mapping:
-            # 电热水器/通用：从设备的模式映射中获取可用模式
+            # 兼容旧缓存：没有 mode_options 时退回原来的做法，但补上占位项过滤
             added = set()
-            for mode_data, mode_desc in self._mode_mapping.items():
-                # 只加入描述性名称（data是数字，desc是中文名）
-                if isinstance(mode_desc, str) and mode_desc not in added:
-                    # 过滤掉明显不是工作模式的值（如"关闭"、"关"等会作为STATE_OFF处理）
-                    if mode_desc not in ('关', '关闭', '关机', 'off', 'OFF'):
-                        modes.append(mode_desc)
-                        added.add(mode_desc)
+            for _, mode_desc in self._mode_mapping.items():
+                if not isinstance(mode_desc, str):
+                    continue
+
+                mode_desc = mode_desc.strip()
+                if not mode_desc or mode_desc in added:
+                    continue
+
+                if V1SpecAttributeParser._is_mode_placeholder(mode_desc):
+                    continue
+
+                modes.append(mode_desc)
+                added.add(mode_desc)
         else:
             # 没有模式信息的简单热水器，至少提供加热模式
             modes.append('heat')
@@ -149,11 +163,12 @@ class HaierWaterHeater(HaierAbstractEntity, WaterHeaterEntity):
             if self._mode_key and self._mode_mapping and self._mode_key in attrs:
                 mode_val = str(attrs[self._mode_key])
                 current_mode = self._mode_mapping.get(mode_val, None)
-                if current_mode and isinstance(current_mode, str):
+                if isinstance(current_mode, str) and current_mode in self._attr_operation_list:
                     self._attr_current_operation = current_mode
                 else:
-                    # fallback
-                    self._attr_current_operation = 'heat' if self._heater_type != 'gas' else 'gas'
+                    # 当前值对应不上可选模式（例如数据里的"未设置"）时，退回第一个可选模式
+                    fallback = next((m for m in self._attr_operation_list if m != STATE_OFF), None)
+                    self._attr_current_operation = fallback or ('gas' if self._heater_type == 'gas' else 'heat')
             else:
                 self._attr_current_operation = 'gas' if self._heater_type == 'gas' else 'heat'
 
