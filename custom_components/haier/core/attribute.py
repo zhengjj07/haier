@@ -18,18 +18,20 @@ _INVALID_MODE_DESCS = ('未设置', '无', '关', '关闭', '关机', '停止', 
 # 统一强制升级为可操作实体。
 # 每项格式：(内部key后缀, 显示名, [中文desc关键词...], [英文名name关键词...])
 _WATER_HEATER_BOOL_FEATURES = [
+    # 用户确认：机器上的"中温保温"字段（heatKeepingStatus / desc=中温保温功能状态）
+    # 实际就是海尔智家 APP 里的"四季温水"，开这个开关热水器就显示四季温水。
+    # 因此把「四季温水」与「中温保温」合并为同一个功能，统一显示为"四季温水"，
+    # 不再为四季温水单独生成额外的虚拟开关（否则会出现一个多余的、点不动的"四季温水"）。
     ('season_temp', '四季温水',
-     ['四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温'],
-     ['seasontemp', 'season_temp', 'fourseason', 'constanttemp', 'midtempkeep']),
+     ['四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温', '中温保温', '中温恒温'],
+     ['seasontemp', 'season_temp', 'fourseason', 'constanttemp',
+      'midtempkeep', 'mid_temp_keep', 'mediumtempkeep', 'insulation']),
     ('auto_off', '自动关机',
      ['自动关机', '自动断电', '加热完成自动', '加热完成后自动', '加热完成后关机',
       '加热后自动', '完成后关机', '完成后自动', '自动停机', '加热完毕', '加热结束'],
      ['autopoweroff', 'autoshutdown', 'autooff', 'autostop', 'heatcompleteauto',
       'heatautopoweroff', 'finishautopoweroff', 'poweroffafterheat', 'heatcomplete',
       'auto_power_off', 'heat_complete_auto', 'complete_auto_off', 'automaticshutdown']),
-    ('mid_temp_keep', '中温保温',
-     ['中温保温', '中温恒温'],
-     ['midtempkeep', 'mid_temp_keep', 'mediumtempkeep', 'insulation']),
     ('sterilization', '智能抑菌',
      ['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'],
      ['sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril']),
@@ -184,7 +186,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         # readable / value / valueRange 类型，方便排查"某个功能为何没有出现"。
         # 无需开 debug，直接在 HA 日志页搜 haier 即可看到。
         if is_water_heater:
-            device_id_marker = attributes[0].get('deviceId', '') if attributes else ''
+            # 尝试从属性里提取 deviceId（attributes[0] 可能不带，需遍历找）
+            device_id_marker = ''
+            for a in attributes:
+                if a.get('deviceId'):
+                    device_id_marker = a['deviceId']
+                    break
             _LOGGER.warning('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
             for a in attributes:
                 name = a.get('name', '')
@@ -248,7 +255,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             if attr['name'].lower() in _control_attrs \
                     and equals_ignore_case(attr['valueRange']['type'], 'LIST'):
                 value_comparison_table = {}
-                for item in attr['valueRange']['dataList']:
+                if 'dataList' not in attr.get('valueRange', {}):
+
+                    items = []
+
+                else:
+
+                    items = attr['valueRange'].get('dataList', [])
+
+                for item in items:
                     value_comparison_table[str(item['data'])] = item['desc']
                     value_comparison_table[str(item['desc'])] = item['data']
                 yield HaierAttribute(
@@ -346,17 +361,46 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             yielded_keys.add(entity_key)
 
         # ---- 1. 四季温水 / 自动关机 / 中温保温 / 智能抑菌 等二元开关 ----
+        # 已知：自动关机在部分机型（如海尔电热水器EC系列）的数字模型里
+        # 压根不返回该属性，但和抑菌/中温保温一样，WebSocket直接下发命令设备会响应。
+        # 因此当找不到匹配时，使用海尔U+协议该功能的标准字段名强制生成开关，
+        # 默认on=1 / off=0（与同机型其他bool字段保持一致）。
+        # 注意：四季温水不再使用虚拟字段，因为它在本机上是真实存在的字段
+        # （heatKeepingStatus / desc=中温保温功能状态），已由上面的关键词匹配命中。
+        _FALLBACK_FIELDS = {
+            'auto_off':    ('autoPowerOffStatus', 1, 0), # 自动关机：最常用字段名
+        }
         for entity_suffix, display_name, desc_keywords, en_keywords in _WATER_HEATER_BOOL_FEATURES:
             attr = _find_attr(desc_keywords, en_keywords)
             if not attr:
-                _LOGGER.warning('water heater feature [%s] not found (cn=%s, en=%s)',
-                                display_name, desc_keywords, en_keywords)
+                # 属性列表里找不到 → 用 fallback 字段名强制生成
+                if entity_suffix in _FALLBACK_FIELDS:
+                    fb_name, fb_on, fb_off = _FALLBACK_FIELDS[entity_suffix]
+                    _LOGGER.warning(
+                        'water heater feature [%s] not in attribute list, '
+                        'fallback to field "%s" (on=%s, off=%s) —— 如果点击后设备无响应，'
+                        '请在海尔智家APP里操作一次该功能，同时抓包确认真实字段名后告知维护者',
+                        display_name, fb_name, fb_on, fb_off
+                    )
+                    # 构造一个"虚拟 attr"交给 _yield_switch
+                    virtual_attr = {
+                        'name': fb_name,
+                        'desc': display_name,
+                        'value': 0,  # 默认显示关闭
+                        'writable': True,
+                        'valueRange': {'type': 'LIST', 'dataList': [
+                            {'data': fb_on, 'desc': '开'},
+                            {'data': fb_off, 'desc': '关'},
+                        ]},
+                    }
+                    yield from _yield_switch(virtual_attr, fb_name, display_name)
+                else:
+                    _LOGGER.warning('water heater feature [%s] not found (cn=%s, en=%s)',
+                                    display_name, desc_keywords, en_keywords)
                 continue
             entity_key = attr['name']  # 用原始字段名，方便和默认解析流程对齐
             # 跳过已经作为正常switch解析的（可写且已被默认流程识别为bool）
             if attr.get('writable') and V1SpecAttributeParser._is_binary_attribute(attr):
-                # 如果已经是正常switch，且当前字段是"中温保温"，把已有的开关改名为"四季温水"
-                # （有些机型中温保温/四季温水共用一个字段，按用户看到的中文名显示）
                 continue
             # 避免重复生成（智能抑菌可能已被下面按钮或switch处理过）
             if entity_key in yielded_keys:
@@ -425,15 +469,19 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             # 启停开关
             for desc, attr in slot_attrs.items():
                 if '启停' in desc or '开关' in desc:
-                    yield from _yield_switch(attr, attr['name'], f'预约{i}开关')
+                    sw_name = '预约开关' if i == 1 else f'预约{i}开关'
+                    yield from _yield_switch(attr, attr['name'], sw_name)
                 elif '循环' in desc or '重复' in desc:
-                    yield from _yield_switch(attr, attr['name'], f'预约{i}每日循环')
+                    # 用户反馈：设备端的"预约循环"开关永远保持开启、点击无法关闭，
+                    # 海尔智家 APP 的预约功能里也没有对应设置项，属于无效实体，
+                    # 因此不再为它生成任何 HA 实体。
+                    continue
                 elif '小时' in desc:
                     # 小时 Number：0-23
-                    step = attr.get('valueRange', {}).get('dataStep', {})
+                    num_name = '预约时间（时）' if i == 1 else f'预约{i}时间（时）'
                     yield HaierAttribute(
                         attr['name'],
-                        f'预约{i}小时',
+                        num_name,
                         Platform.NUMBER,
                         {
                             'native_min_value': 0.0,
@@ -444,9 +492,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                         {'data_key': attr['name']}
                     )
                 elif '分钟' in desc:
+                    num_name = '预约时间（分）' if i == 1 else f'预约{i}时间（分）'
                     yield HaierAttribute(
                         attr['name'],
-                        f'预约{i}分钟',
+                        num_name,
                         Platform.NUMBER,
                         {
                             'native_min_value': 0.0,
@@ -458,9 +507,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     )
                 elif '温度' in desc:
                     step = attr.get('valueRange', {}).get('dataStep', {})
+                    num_name = '预约温度' if i == 1 else f'预约{i}温度'
                     yield HaierAttribute(
                         attr['name'],
-                        f'预约{i}温度',
+                        num_name,
                         Platform.NUMBER,
                         {
                             'native_min_value': float(step.get('minValue', 35)),
@@ -480,7 +530,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         ext = {}
         if equals_ignore_case(attribute['valueRange']['type'], 'LIST'):
             value_comparison_table = {}
-            for item in attribute['valueRange']['dataList']:
+            dl = attribute['valueRange'].get('dataList', [])
+
+            for item in dl:
                 value_comparison_table[str(item['data'])] = item['desc']
 
             options['device_class'] = SensorDeviceClass.ENUM
@@ -518,7 +570,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
     @staticmethod
     def _parse_as_select(attribute):
         value_comparison_table = {}
-        for item in attribute['valueRange']['dataList']:
+        dl = attribute['valueRange'].get('dataList', [])
+
+        for item in dl:
             value_comparison_table[str(item['data'])] = item['desc']
             value_comparison_table[str(item['desc'])] = item['data']
 
@@ -526,8 +580,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             'value_comparison_table': value_comparison_table
         }
 
+        dl = attribute['valueRange'].get('dataList', [])
         options = {
-            'options': [item['desc'] for item in attribute['valueRange']['dataList']]
+            'options': [item['desc'] for item in dl]
         }
 
         return HaierAttribute(attribute['name'], attribute['desc'], Platform.SELECT, options, ext)
@@ -561,12 +616,13 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
     @staticmethod
     def _parse_as_button(attribute):
-        item = attribute['valueRange']['dataList'][0]
+        dl = attribute.get('valueRange', {}).get('dataList', [])
+        cmd = dl[0]['data'] if dl else True
         return HaierAttribute(
             attribute['name'],
             attribute['desc'],
             Platform.BUTTON,
-            ext={'command_value': item['data']}
+            ext={'command_value': cmd}
         )
 
     @staticmethod
@@ -630,11 +686,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         else:
             raise RuntimeError('targetTemp attr not found')
 
-        data_step = target_temperature_attr['valueRange']['dataStep']
+        vr = target_temperature_attr.get('valueRange', {})
+        data_step = vr.get('dataStep', {'minValue': 35, 'maxValue': 75, 'step': 1})
         options = {
-            'min_temp': float(data_step['minValue']),
-            'max_temp': float(data_step['maxValue']),
-            'target_temperature_step': float(data_step['step'])
+            'min_temp': float(data_step.get('minValue', 35)),
+            'max_temp': float(data_step.get('maxValue', 75)),
+            'target_temperature_step': float(data_step.get('step', 1))
         }
 
         ext = {
@@ -656,11 +713,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         else:
             raise RuntimeError('targetTemp attr not found for electric water heater')
 
-        data_step = target_temperature_attr['valueRange']['dataStep']
+        vr = target_temperature_attr.get('valueRange', {})
+        data_step = vr.get('dataStep', {'minValue': 35, 'maxValue': 75, 'step': 1})
         options = {
-            'min_temp': float(data_step['minValue']),
-            'max_temp': float(data_step['maxValue']),
-            'target_temperature_step': float(data_step['step'])
+            'min_temp': float(data_step.get('minValue', 35)),
+            'max_temp': float(data_step.get('maxValue', 75)),
+            'target_temperature_step': float(data_step.get('step', 1))
         }
 
         # 查找当前温度字段（电热水器常见：innerWaterTemp/waterTemp/inTemp）
@@ -679,7 +737,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     mode_mapping = {}
                     ordered_options = []
                     seen = set()
-                    for item in attr['valueRange']['dataList']:
+                    if 'dataList' not in attr.get('valueRange', {}):
+
+                        items = []
+
+                    else:
+
+                        items = attr['valueRange'].get('dataList', [])
+
+                    for item in items:
                         data_val = item['data']
                         desc = item['desc']
                         # 过滤掉无效占位选项
@@ -714,11 +780,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         else:
             raise RuntimeError(f'{temp_key} attr not found for generic water heater')
 
-        data_step = target_temperature_attr['valueRange']['dataStep']
+        vr = target_temperature_attr.get('valueRange', {})
+        data_step = vr.get('dataStep', {'minValue': 35, 'maxValue': 75, 'step': 1})
         options = {
-            'min_temp': float(data_step['minValue']),
-            'max_temp': float(data_step['maxValue']),
-            'target_temperature_step': float(data_step['step'])
+            'min_temp': float(data_step.get('minValue', 35)),
+            'max_temp': float(data_step.get('maxValue', 75)),
+            'target_temperature_step': float(data_step.get('step', 1))
         }
 
         current_temp_key = None
@@ -735,7 +802,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     mode_mapping = {}
                     ordered_options = []
                     seen = set()
-                    for item in attr['valueRange']['dataList']:
+                    if 'dataList' not in attr.get('valueRange', {}):
+
+                        items = []
+
+                    else:
+
+                        items = attr['valueRange'].get('dataList', [])
+
+                    for item in items:
                         data_val = item['data']
                         desc = item['desc']
                         if desc in _INVALID_MODE_DESCS or str(data_val) in _INVALID_MODE_DESCS:
