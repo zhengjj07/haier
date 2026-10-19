@@ -9,6 +9,7 @@ from .core.device import HaierDevice
 from .core.event import EVENT_DEVICE_DATA_CHANGED, EVENT_DEVICE_CONTROL, \
     EVENT_DEVICE_ONLINE_CHANGED, EVENT_GATEWAY_DISCONNECTED
 from .core.event import listen_event, fire_event
+from .helpers import _normalize_cmd_value
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,12 +45,18 @@ class HaierAbstractEntity(Entity, ABC):
     def _send_command(self, attributes):
         """
         发送控制命令
-        :param attributes:
+        :param attributes: dict 中的 key 会被转换为 ext['data_key']（如果有）
         :return:
         """
+        # 允许增强实体用 ext['data_key'] 指定实际下发的字段名
+        remapped = {}
+        for k, v in attributes.items():
+            # 若实体自身指定了 data_key，则把自己名下的命令替换到真实字段
+            real_key = self._attribute.ext.get('data_key') if k == self._attribute.key else None
+            remapped[real_key or k] = _normalize_cmd_value(v)
         fire_event(self.hass, EVENT_DEVICE_CONTROL, {
             'deviceId': self._device.id,
-            'attributes': attributes
+            'attributes': remapped
         })
 
     @abstractmethod

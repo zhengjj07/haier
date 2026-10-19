@@ -30,12 +30,11 @@ class HaierButton(HaierAbstractEntity, ButtonEntity):
         super().__init__(device, attribute)
 
     def _update_value(self):
-        # A button has no persistent value.  The base entity still uses each
-        # incoming snapshot to mark the command available.
         return None
 
     def press(self, **kwargs: Any) -> None:
-        data_key = self._attribute.ext.get('data_key', self._attribute.key)
-        self._send_command({
-            data_key: self._attribute.ext['command_value']
-        })
+        # 按钮实体有单独的 data_key，所以直接用真实字段名下发；
+        # 若没有 data_key，则用 attribute.key 自身（保持原行为）。
+        cmd_key = self._attribute.ext.get('data_key', self._attribute.key)
+        cmd_val = self._attribute.ext['command_value']
+        self._send_command({cmd_key: cmd_val})

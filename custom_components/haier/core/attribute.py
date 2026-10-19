@@ -6,28 +6,51 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.const import Platform, UnitOfTemperature, PERCENTAGE, UnitOfVolume, UnitOfEnergy
 
-from custom_components.haier.helpers import equals_ignore_case, contains_any_ignore_case
+try:
+    from .helpers import equals_ignore_case, contains_any_ignore_case, _normalize_cmd_value
+except ImportError:
+    from haier.helpers import equals_ignore_case, contains_any_ignore_case, _normalize_cmd_value
 
 _LOGGER = logging.getLogger(__name__)
 
-# 热水器辅助功能：按属性的中文描述(desc)匹配，避免依赖各机型并不统一的英文字段名。
-# 每一项为 (在 HA 中展示的名称, 描述关键词元组)
-WATER_HEATER_EXTRA_FEATURES = [
-    ('四季温水', ('四季温水', '四季恒温', '四季温感')),
-    ('智能抑菌', ('智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌')),
-    ('自动关机', ('自动关机', '自动断电', '加热完成自动')),
-    ('定时开关机', ('定时开关机', '定时开关', '定时开机', '定时关机', '定时')),
+# 描述里的无效/占位选项，模式列表里应当过滤掉
+_INVALID_MODE_DESCS = ('未设置', '无', '关', '关闭', '关机', '停止', 'off', 'OFF', 'none', 'None', '')
+
+# 热水器：按中文 desc 识别的特殊功能——即使被云端标为 writable=false，
+# 实际控制命令仍可下发；默认流程会把它们当成只读 Sensor 丢掉，这里
+# 统一强制升级为可操作实体。
+_WATER_HEATER_BOOL_FEATURES = [
+    ('season_temp', '四季温水', ['四季温水', '四季恒温', '四季温感']),
+    ('auto_off', '自动关机', ['自动关机', '自动断电', '加热完成自动', '加热完成后自动']),
 ]
 
-# 加热模式选项中需要过滤掉的占位项：数据里的"未设置"、纯数字等并不是可选的加热模式
-MODE_PLACEHOLDER_VALUES = {
-    '未设置', '未设定', '未选择', '不设置', '无', 'none', 'unset', 'null',
-    'n/a', 'na', '--', '-', '', '关闭', '关机', '关', 'off', '停止'
-}
+# 预约时段数量上限（覆盖预约1 ~ 预约N）
+_MAX_RESERVATION_SLOTS = 4
 
-# 布尔型属性在云端可能用 true/false、1/0，也可能用"开/关"，统一在此声明
-TRUE_VALUES = ('true', '1', 'on', 'open', 'yes', '开', '开启', '打开', '启用')
-FALSE_VALUES = ('false', '0', 'off', 'close', 'no', '关', '关闭', '停止', '禁用')
+# 关键词表：用于在 parse_attribute 阶段就识别出"虽然 writable=false
+# 但后续会被热水器增强逻辑升级为可写实体"的字段，直接跳过只读副本，
+# 避免 HA 里出现同名"双胞胎"（一个 switch + 一个 binary_sensor/sensor）。
+_WH_FORCE_WRITABLE_BOOL_KWS = [
+    '四季温水', '四季恒温', '四季温感',
+    '自动关机', '自动断电', '加热完成自动',
+    '智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌',
+    '中温保温',
+]
+
+_WH_RESERVATION_PREFIXES = ('预约', '定时')
+_WH_RESERVATION_KEYWORDS = ('启停', '开关', '循环', '重复', '小时', '分钟', '温度')
+
+
+def _is_wh_reservation(desc: str) -> bool:
+    """判断 desc 是否为热水器预约/定时字段（预约1启停、预约1循环、预约1时间小时 等）。"""
+    if not desc:
+        return False
+    for p in _WH_RESERVATION_PREFIXES:
+        if desc.startswith(p):
+            for kw in _WH_RESERVATION_KEYWORDS:
+                if kw in desc:
+                    return True
+    return False
 
 
 class HaierAttribute:
@@ -70,12 +93,21 @@ class HaierAttributeParser(ABC):
     def parse_global(self, attributes: List[dict]):
         pass
 
+
 class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
     def parse_attribute(self, attribute: dict) -> HaierAttribute:
         # 没有value的attribute后续无法正常使用，所以需要过滤掉
         if 'value' not in attribute:
             return None
+
+        # —— 热水器增强字段黑名单：这些字段虽然被云端标记为 writable=false
+        # 或为STEP只读，但实际可以下发命令，后面 parse_global 会专门为它们
+        # 生成可写的 Switch/Number/Button 实体。这里跳过只读副本，避免 HA
+        # 里出现同名但不可操作的"双胞胎"实体。
+        if not attribute['writable'] and attribute['readable']:
+            if self._is_water_heater_forced_writable(attribute):
+                return None
 
         if not attribute['writable'] and attribute['readable']:
             return self._parse_as_sensor(attribute)
@@ -104,6 +136,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         all_attribute_keys = [attribute['name'] for attribute in attributes]
         attr_dict = {a['name']: a for a in attributes}
 
+        # 判断是不是热水器（用于后续增强实体判断）
+        is_water_heater = any(key in all_attribute_keys for key in
+                              ('targetTemp', 'targetTemperature')) and 'onOffStatus' in all_attribute_keys
+
         # 空调特征字段
         climate_feature_fields = [
             ['targetTemperature', 'operationMode', 'windSpeed'],
@@ -116,15 +152,12 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                 break
 
         # 热水器识别（修复：扩展支持电热水器和更多型号）
-        water_heater_parsed = False
         # 1. 完整燃气热水器：有出水温度、目标温度、累计用气量
         if 'outWaterTemp' in all_attribute_keys and 'targetTemp' in all_attribute_keys and 'totalUseGasL' in all_attribute_keys:
             yield self._parse_as_gas_water_heater(attributes)
-            water_heater_parsed = True
         # 2. 降级燃气热水器（issue #126：无出水温度字段，如JSQ30-16R3BWU1）
         elif 'targetTemp' in all_attribute_keys and 'onOffStatus' in all_attribute_keys and 'totalUseGasL' in all_attribute_keys:
             yield self._parse_as_gas_water_heater(attributes, out_water_temp_optional=True)
-            water_heater_parsed = True
         # 3. 电热水器：有目标温度 + 开关机状态 + 无累计用气量
         elif 'targetTemp' in all_attribute_keys and 'onOffStatus' in all_attribute_keys:
             # 查找加热模式字段
@@ -134,7 +167,6 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     mode_key = mk
                     break
             yield self._parse_as_electric_water_heater(attributes, mode_key=mode_key)
-            water_heater_parsed = True
         # 4. 目标温度用 targetTemperature 命名的热水器（部分新型号/空气能）
         elif 'targetTemperature' in all_attribute_keys and 'onOffStatus' in all_attribute_keys:
             mode_key = None
@@ -143,14 +175,6 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     mode_key = mk
                     break
             yield self._parse_as_generic_water_heater(attributes, temp_key='targetTemperature', mode_key=mode_key)
-            water_heater_parsed = True
-
-        # 热水器辅助功能：四季温水 / 智能抑菌 / 自动关机 / 定时开关机
-        # 这些功能在部分机型上被云端标记为只读、或因为缺少 value 字段而在通用流程里被丢弃，
-        # 这里按 desc 兜底补齐为可操作实体。
-        if water_heater_parsed:
-            for extra in self._parse_water_heater_extras(attributes):
-                yield extra
 
         # 窗帘
         if 'openDegree' in all_attribute_keys:
@@ -175,130 +199,189 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     {'value_comparison_table': value_comparison_table, 'data_key': attr['name']}
                 )
 
-    def _parse_water_heater_extras(self, attributes: List[dict]):
-        """为热水器补齐辅助功能实体（四季温水/智能抑菌/自动关机/定时开关机）。
+        # —— 热水器增强实体 ——
+        # 基于中文 desc 匹配来强制生成可操作实体，覆盖：
+        #   * 四季温水开关
+        #   * 自动关机开关（加热完成后关机）
+        #   * 智能抑菌按钮（单次触发）
+        #   * 预约启停/循环开关、预约小时/分钟/温度Number
+        # 这些字段在部分机型上被云端标记为 writable=false，默认流程会
+        # 把它们当成 Sensor，但实际控制命令依然可以下发。
+        if is_water_heater:
+            yield from self._parse_water_heater_extra_entities(attributes)
 
-        匹配依据是属性的中文描述，因此不受各机型英文字段名不一致的影响。
-        仅在该属性没有在通用流程中生成可控实体时才额外生成，避免出现重复实体。
-        """
-        for attribute in attributes:
-            desc = str(attribute.get('desc', '') or '')
+    # ------------------------------------------------------------------
+    # 热水器增强实体：通过中文 desc 识别，强制生成可控制的实体
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_water_heater_extra_entities(attributes: List[dict]):
+        # 构建已解析实体名集合，用于去除重复生成（同名只读副本将由前端过滤或合并）
+        yielded_keys = set()
 
-            feature_name = None
-            for name, keywords in WATER_HEATER_EXTRA_FEATURES:
-                if any(keyword in desc for keyword in keywords):
-                    feature_name = name
-                    break
+        def _desc_contains(desc, keywords):
+            """中文 desc 模糊匹配（desc 包含任意关键词即命中）"""
+            if not desc:
+                return False
+            for kw in keywords:
+                if kw in desc:
+                    return True
+            return False
 
-            if feature_name is None:
-                continue
+        def _find_attr(keywords):
+            for attr in attributes:
+                if _desc_contains(attr.get('desc', ''), keywords):
+                    return attr
+            return None
 
-            value_range = attribute.get('valueRange') or {}
-            if not equals_ignore_case(value_range.get('type'), 'LIST'):
-                continue
+        def _on_off_values(attr):
+            """根据字段当前值/valueRange推断开/关的原始值。"""
+            vr = attr.get('valueRange', {})
+            raw = attr.get('value')
+            # 有 dataList 的情况：取两项
+            if equals_ignore_case(vr.get('type'), 'LIST') and 'dataList' in vr:
+                items = vr['dataList']
+                true_data, false_data = True, False
+                for it in items:
+                    d = str(it.get('data', ''))
+                    desc = str(it.get('desc', ''))
+                    if d.lower() in ('true', '1', '开', '开启') or '开' in desc or '启用' in desc:
+                        true_data = it['data']
+                    if d.lower() in ('false', '0', '关', '关闭') or '关' in desc or '禁用' in desc:
+                        false_data = it['data']
+                return true_data, false_data
+            # 否则根据当前值类型推断
+            if isinstance(raw, bool):
+                return True, False
+            if isinstance(raw, int):
+                return 1, 0
+            if isinstance(raw, str):
+                if raw in ('1', '0'):
+                    return '1', '0'
+                if raw.lower() in ('true', 'false'):
+                    return 'true', 'false'
+            return True, False
 
-            existing = self.parse_attribute(attribute)
-            if existing is not None and existing.platform in (
-                    Platform.SWITCH, Platform.BUTTON, Platform.SELECT, Platform.NUMBER):
-                # 通用流程已经产出了可操作实体，无需重复
-                continue
-
-            data_list = value_range.get('dataList') or []
-            if len(data_list) == 0:
-                continue
-
-            key = attribute['name'] + '_extra'
-
-            # 单项命令：只能触发，用按钮承载
-            if len(data_list) == 1:
-                yield HaierAttribute(
-                    key,
-                    feature_name,
-                    Platform.BUTTON,
-                    ext={'command_value': data_list[0]['data'], 'data_key': attribute['name']}
-                )
-                continue
-
-            # 双项：开关型功能
-            if len(data_list) == 2:
-                on_value, off_value = V1SpecAttributeParser._extract_boolean_values(data_list)
-                yield HaierAttribute(
-                    key,
-                    feature_name,
-                    Platform.SWITCH,
-                    {'device_class': SwitchDeviceClass.SWITCH},
-                    ext={
-                        'data_key': attribute['name'],
-                        'on_value': on_value,
-                        'off_value': off_value,
-                    }
-                )
-                continue
-
-            # 多项：选择型功能
-            value_comparison_table = {}
-            for item in data_list:
-                value_comparison_table[str(item['data'])] = item['desc']
-                value_comparison_table[str(item['desc'])] = item['data']
-
+        def _yield_switch(attr, entity_key, display_name):
+            on_v, off_v = _on_off_values(attr)
             yield HaierAttribute(
-                key,
-                feature_name,
-                Platform.SELECT,
-                {'options': [item['desc'] for item in data_list]},
-                ext={'value_comparison_table': value_comparison_table, 'data_key': attribute['name']}
+                entity_key,
+                display_name,
+                Platform.SWITCH,
+                {'device_class': SwitchDeviceClass.SWITCH},
+                {
+                    # 直接用属性的原始 name 做数据 key（entity_key 是我们内部唯一标识）
+                    'data_key': attr['name'],
+                    'on_value': on_v,
+                    'off_value': off_v,
+                }
             )
+            yielded_keys.add(entity_key)
 
-    @staticmethod
-    def _extract_mode_options(attribute) -> List[str]:
-        """从LIST属性中提取有序、去重、已过滤占位项的选项描述列表。"""
-        options = []
-        seen = set()
-        for item in attribute['valueRange']['dataList']:
-            desc = item.get('desc', None)
-            if desc is None:
+        # ---- 1. 四季温水 / 自动关机 等二元开关 ----
+        for entity_suffix, display_name, keywords in _WATER_HEATER_BOOL_FEATURES:
+            attr = _find_attr(keywords)
+            if not attr:
+                _LOGGER.debug('water heater feature %s not found (keywords=%s)', display_name, keywords)
+                continue
+            entity_key = attr['name']  # 用原始字段名，方便和默认解析流程对齐
+            # 跳过已经作为正常switch解析的（智能抑菌会走正常路径）
+            if attr.get('writable') and V1SpecAttributeParser._is_binary_attribute(attr):
+                continue
+            yield from _yield_switch(attr, entity_key, display_name)
+
+        # ---- 2. 智能抑菌：若被云端标记为只读LIST，按按钮生成（单次触发） ----
+        sterilization = _find_attr(['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'])
+        if sterilization is not None and not (
+                sterilization.get('writable')
+                and V1SpecAttributeParser._is_binary_attribute(sterilization)):
+            # 判断是不是"单次触发"（dataList只有1项或 desc 里含"一次"）
+            desc = sterilization.get('desc', '')
+            vr = sterilization.get('valueRange', {})
+            is_one_shot = ('一次' in desc) or (
+                    equals_ignore_case(vr.get('type'), 'LIST') and len(vr.get('dataList', [])) <= 1)
+            if is_one_shot:
+                cmd_value = True
+                if equals_ignore_case(vr.get('type'), 'LIST') and vr.get('dataList'):
+                    cmd_value = vr['dataList'][0].get('data', True)
+                yield HaierAttribute(
+                    sterilization['name'],
+                    sterilization.get('desc', '智能抑菌'),
+                    Platform.BUTTON,
+                    ext={'command_value': cmd_value, 'data_key': sterilization['name']}
+                )
+                yielded_keys.add(sterilization['name'])
+            else:
+                yield from _yield_switch(sterilization, sterilization['name'],
+                                         sterilization.get('desc', '智能抑菌'))
+
+        # ---- 3. 预约/定时开关机：预约{N}启停、循环、小时、分钟、温度 ----
+        # 海尔电热水器的定时是靠"预约1/预约2"实现的，每个预约包含：
+        #   预约1启停 (LIST 开/关)
+        #   预约1循环 (LIST 开/关：是否每天重复)
+        #   预约1时间小时 (STEP 0-23)
+        #   预约1时间分钟 (STEP 0-59)
+        #   预约1温度 (STEP 35-75，部分机型)
+        for i in range(1, _MAX_RESERVATION_SLOTS + 1):
+            prefixes = [f'预约{i}', f'预约{i}号', f'定时{i}', f'定时{i}号']
+            slot_attrs = {}
+            for attr in attributes:
+                desc = attr.get('desc', '')
+                for p in prefixes:
+                    if desc.startswith(p):
+                        slot_attrs[desc] = attr
+                        break
+
+            if not slot_attrs:
                 continue
 
-            desc = str(desc).strip()
-            if not desc or desc in seen:
-                continue
-
-            if V1SpecAttributeParser._is_mode_placeholder(desc):
-                continue
-
-            seen.add(desc)
-            options.append(desc)
-
-        return options
-
-    @staticmethod
-    def _is_mode_placeholder(desc: str) -> bool:
-        """判断某个模式描述是否是占位项（如"未设置"、纯数字）。"""
-        normalized = desc.strip().lower()
-        return normalized in MODE_PLACEHOLDER_VALUES or normalized.isdigit()
-
-    @staticmethod
-    def _extract_boolean_values(data_list):
-        """从双项LIST中判断哪一个 data 表示"开"、哪一个表示"关"。"""
-        on_value = None
-        off_value = None
-
-        for item in data_list:
-            raw = str(item.get('data', '')).strip().lower()
-            desc = str(item.get('desc', '') or '').strip().lower()
-
-            if on_value is None and (raw in TRUE_VALUES or desc in TRUE_VALUES):
-                on_value = item['data']
-            elif off_value is None and (raw in FALSE_VALUES or desc in FALSE_VALUES):
-                off_value = item['data']
-
-        if on_value is None:
-            on_value = data_list[1]['data']
-
-        if off_value is None:
-            off_value = data_list[0]['data']
-
-        return on_value, off_value
+            # 启停开关
+            for desc, attr in slot_attrs.items():
+                if '启停' in desc or '开关' in desc:
+                    yield from _yield_switch(attr, attr['name'], f'预约{i}开关')
+                elif '循环' in desc or '重复' in desc:
+                    yield from _yield_switch(attr, attr['name'], f'预约{i}每日循环')
+                elif '小时' in desc:
+                    # 小时 Number：0-23
+                    step = attr.get('valueRange', {}).get('dataStep', {})
+                    yield HaierAttribute(
+                        attr['name'],
+                        f'预约{i}小时',
+                        Platform.NUMBER,
+                        {
+                            'native_min_value': 0.0,
+                            'native_max_value': 23.0,
+                            'native_step': 1.0,
+                            'native_unit_of_measurement': '时',
+                        },
+                        {'data_key': attr['name']}
+                    )
+                elif '分钟' in desc:
+                    yield HaierAttribute(
+                        attr['name'],
+                        f'预约{i}分钟',
+                        Platform.NUMBER,
+                        {
+                            'native_min_value': 0.0,
+                            'native_max_value': 59.0,
+                            'native_step': 1.0,
+                            'native_unit_of_measurement': '分',
+                        },
+                        {'data_key': attr['name']}
+                    )
+                elif '温度' in desc:
+                    step = attr.get('valueRange', {}).get('dataStep', {})
+                    yield HaierAttribute(
+                        attr['name'],
+                        f'预约{i}温度',
+                        Platform.NUMBER,
+                        {
+                            'native_min_value': float(step.get('minValue', 35)),
+                            'native_max_value': float(step.get('maxValue', 75)),
+                            'native_step': float(step.get('step', 1)),
+                            'native_unit_of_measurement': UnitOfTemperature.CELSIUS,
+                        },
+                        {'data_key': attr['name']}
+                    )
 
     @staticmethod
     def _parse_as_sensor(attribute):
@@ -367,7 +450,26 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             'device_class': SwitchDeviceClass.SWITCH
         }
 
-        return HaierAttribute(attribute['name'], attribute['desc'], Platform.SWITCH, options)
+        # 推断 on/off 的原始值类型
+        on_v, off_v = True, False
+        vr = attribute.get('valueRange', {})
+        if equals_ignore_case(vr.get('type'), 'LIST') and 'dataList' in vr:
+            for it in vr['dataList']:
+                d = it.get('data')
+                desc = str(it.get('desc', ''))
+                if str(d).lower() in ('true', '1') or '开' in desc:
+                    on_v = d
+                if str(d).lower() in ('false', '0') or '关' in desc:
+                    off_v = d
+        raw = attribute.get('value')
+        if isinstance(raw, int):
+            on_v, off_v = 1, 0
+        elif isinstance(raw, str):
+            if raw in ('1', '0'):
+                on_v, off_v = '1', '0'
+
+        ext = {'on_value': on_v, 'off_value': off_v}
+        return HaierAttribute(attribute['name'], attribute['desc'], Platform.SWITCH, options, ext)
 
     @staticmethod
     def _parse_as_button(attribute):
@@ -388,6 +490,22 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             and len(data_list) == 1
             and str(data_list[0].get('data')).lower() in ('true', 'false')
         )
+
+    @staticmethod
+    def _is_water_heater_forced_writable(attribute):
+        """判断一个 writable=false 的字段是否会被热水器增强逻辑升级为可写实体。
+
+        用于在 parse_attribute 阶段直接跳过只读副本，避免出现 switch+binary_sensor 同名双胞胎。
+        """
+        desc = attribute.get('desc', '')
+        if not desc:
+            return False
+        for kw in _WH_FORCE_WRITABLE_BOOL_KWS:
+            if kw in desc:
+                return True
+        if _is_wh_reservation(desc):
+            return True
+        return False
 
     @staticmethod
     def _parse_as_climate(attributes: List[dict], feature_fields: List[str]):
@@ -461,17 +579,26 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                 current_temp_key = ck
                 break
 
-        # 构建模式映射表
+        # 构建模式映射表（只保留 数字→中文 方向，避免双向字典污染操作列表）
         mode_mapping = None
         mode_options = None
         if mode_key:
             for attr in attributes:
                 if attr['name'] == mode_key and 'valueRange' in attr and equals_ignore_case(attr['valueRange']['type'], 'LIST'):
                     mode_mapping = {}
+                    ordered_options = []
+                    seen = set()
                     for item in attr['valueRange']['dataList']:
-                        mode_mapping[str(item['data'])] = item['desc']
-                        mode_mapping[item['desc']] = item['data']
-                    mode_options = V1SpecAttributeParser._extract_mode_options(attr)
+                        data_val = item['data']
+                        desc = item['desc']
+                        # 过滤掉无效占位选项
+                        if desc in _INVALID_MODE_DESCS or str(data_val) in _INVALID_MODE_DESCS:
+                            continue
+                        mode_mapping[str(data_val)] = desc
+                        if desc not in seen:
+                            ordered_options.append(desc)
+                            seen.add(desc)
+                    mode_options = ordered_options
                     break
 
         ext = {
@@ -485,7 +612,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             'mode_options': mode_options,
         }
 
-        return HaierAttribute('electric_water_heater', 'ElectricWaterHeater', Platform.WATER_HEATER, options, ext)
+        return HaierAttribute('electric_water_heater', 'WaterHeater', Platform.WATER_HEATER, options, ext)
 
     @staticmethod
     def _parse_as_generic_water_heater(attributes: List[dict], temp_key: str = 'targetTemperature', mode_key: str = None):
@@ -515,10 +642,18 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             for attr in attributes:
                 if attr['name'] == mode_key and 'valueRange' in attr and equals_ignore_case(attr['valueRange']['type'], 'LIST'):
                     mode_mapping = {}
+                    ordered_options = []
+                    seen = set()
                     for item in attr['valueRange']['dataList']:
-                        mode_mapping[str(item['data'])] = item['desc']
-                        mode_mapping[item['desc']] = item['data']
-                    mode_options = V1SpecAttributeParser._extract_mode_options(attr)
+                        data_val = item['data']
+                        desc = item['desc']
+                        if desc in _INVALID_MODE_DESCS or str(data_val) in _INVALID_MODE_DESCS:
+                            continue
+                        mode_mapping[str(data_val)] = desc
+                        if desc not in seen:
+                            ordered_options.append(desc)
+                            seen.add(desc)
+                    mode_options = ordered_options
                     break
 
         ext = {
@@ -547,7 +682,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         ext = {
             'customize': True,
         }
-        return HaierAttribute('cover', 'Cover', Platform.COVER, options,ext)
+        return HaierAttribute('cover', 'Cover', Platform.COVER, options, ext)
 
     @staticmethod
     def _is_binary_attribute(attribute):
@@ -569,7 +704,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
         if '累计' in attribute['desc']:
             state_class = SensorStateClass.TOTAL
-        
+
         if '本次' in attribute['desc']:
             state_class = SensorStateClass.TOTAL_INCREASING
 
