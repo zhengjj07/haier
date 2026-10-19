@@ -16,10 +16,23 @@ _INVALID_MODE_DESCS = ('未设置', '无', '关', '关闭', '关机', '停止', 
 # 热水器：按中文 desc 识别的特殊功能——即使被云端标为 writable=false，
 # 实际控制命令仍可下发；默认流程会把它们当成只读 Sensor 丢掉，这里
 # 统一强制升级为可操作实体。
+# 每项格式：(内部key后缀, 显示名, [中文desc关键词...], [英文名name关键词...])
 _WATER_HEATER_BOOL_FEATURES = [
-    ('season_temp', '四季温水', ['四季温水', '四季恒温', '四季温感']),
-    ('auto_off', '自动关机', ['自动关机', '自动断电', '加热完成自动', '加热完成后自动']),
-    ('mid_temp_keep', '中温保温', ['中温保温']),
+    ('season_temp', '四季温水',
+     ['四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温'],
+     ['seasontemp', 'season_temp', 'fourseason', 'constanttemp', 'midtempkeep']),
+    ('auto_off', '自动关机',
+     ['自动关机', '自动断电', '加热完成自动', '加热完成后自动', '加热完成后关机',
+      '加热后自动', '完成后关机', '完成后自动', '自动停机', '加热完毕', '加热结束'],
+     ['autopoweroff', 'autoshutdown', 'autooff', 'autostop', 'heatcompleteauto',
+      'heatautopoweroff', 'finishautopoweroff', 'poweroffafterheat', 'heatcomplete',
+      'auto_power_off', 'heat_complete_auto', 'complete_auto_off', 'automaticshutdown']),
+    ('mid_temp_keep', '中温保温',
+     ['中温保温', '中温恒温'],
+     ['midtempkeep', 'mid_temp_keep', 'mediumtempkeep', 'insulation']),
+    ('sterilization', '智能抑菌',
+     ['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'],
+     ['sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril']),
 ]
 
 # 预约时段数量上限（覆盖预约1 ~ 预约N）
@@ -29,10 +42,24 @@ _MAX_RESERVATION_SLOTS = 4
 # 但后续会被热水器增强逻辑升级为可写实体"的字段，直接跳过只读副本，
 # 避免 HA 里出现同名"双胞胎"（一个 switch + 一个 binary_sensor/sensor）。
 _WH_FORCE_WRITABLE_BOOL_KWS = [
-    '四季温水', '四季恒温', '四季温感',
-    '自动关机', '自动断电', '加热完成自动',
+    # 四季温水
+    '四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温',
+    # 自动关机
+    '自动关机', '自动断电', '加热完成自动', '加热完成后自动', '加热完成后关机',
+    '加热后自动', '完成后关机', '完成后自动', '自动停机', '加热完毕', '加热结束',
+    # 智能抑菌
     '智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌',
-    '中温保温',
+    # 中温保温
+    '中温保温', '中温恒温',
+]
+
+# 英文名（name 字段）关键词，用于部分机型 desc 为英文/通用命名时也能识别
+_WH_FORCE_WRITABLE_EN_KWS = [
+    'seasontemp', 'season_temp', 'fourseason', 'constanttemp', 'midtempkeep',
+    'autopoweroff', 'autoshutdown', 'autooff', 'autostop', 'heatcomplete',
+    'autopower', 'poweroffafter', 'heatcompleteauto', 'heatautopoweroff',
+    'finishautopoweroff', 'completeautopoweroff', 'auto_power_off',
+    'sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril',
 ]
 
 _WH_RESERVATION_PREFIXES = ('预约', '定时')
@@ -48,6 +75,20 @@ def _is_wh_reservation(desc: str) -> bool:
             for kw in _WH_RESERVATION_KEYWORDS:
                 if kw in desc:
                     return True
+    # 处理"定时开"/"定时关"这种没有数字的变体
+    if ('定时' in desc or '预约' in desc) and any(kw in desc for kw in _WH_RESERVATION_KEYWORDS):
+        return True
+    return False
+
+
+def _attr_name_matches(name: str, en_keywords) -> bool:
+    """按英文名模糊匹配（不区分大小写，去除下划线）。"""
+    if not name:
+        return False
+    n = name.lower().replace('_', '')
+    for kw in en_keywords:
+        if kw.lower().replace('_', '') in n:
+            return True
     return False
 
 
@@ -138,12 +179,13 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         is_water_heater = any(key in all_attribute_keys for key in
                               ('targetTemp', 'targetTemperature')) and 'onOffStatus' in all_attribute_keys
 
-        # —— 热水器全属性 dump（debug）：当开启 haier debug 日志时，
-        # 会打印该热水器数字模型里每一个属性的 name / desc / writable /
+        # —— 热水器全属性 dump（WARNING 级别）：
+        # 默认日志就会打印该热水器数字模型里每一个属性的 name / desc / writable /
         # readable / value / valueRange 类型，方便排查"某个功能为何没有出现"。
-        if is_water_heater and _LOGGER.isEnabledFor(logging.DEBUG):
+        # 无需开 debug，直接在 HA 日志页搜 haier 即可看到。
+        if is_water_heater:
             device_id_marker = attributes[0].get('deviceId', '') if attributes else ''
-            _LOGGER.debug('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
+            _LOGGER.warning('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
             for a in attributes:
                 name = a.get('name', '')
                 desc = a.get('desc', '')
@@ -152,11 +194,11 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                 value = a.get('value', '<no value>')
                 vr = a.get('valueRange', {})
                 vr_type = vr.get('type', '') if vr else ''
-                _LOGGER.debug(
-                    '  attr: name=%-30s desc=%-20s writable=%s readable=%s value=%s rangeType=%s',
+                _LOGGER.warning(
+                    '  attr: name=%-32s desc=%-24s writable=%s readable=%s value=%s rangeType=%s',
                     name, desc, writable, readable, value, vr_type
                 )
-            _LOGGER.debug('=== End attribute dump ===')
+            _LOGGER.warning('=== End attribute dump ===')
 
         # 空调特征字段
         climate_feature_fields = [
@@ -245,10 +287,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     return True
             return False
 
-        def _find_attr(keywords):
+        def _find_attr(desc_keywords, en_keywords=None):
+            """按中文 desc 模糊匹配，或按英文名模糊匹配（en_keywords）。"""
             for attr in attributes:
-                if _desc_contains(attr.get('desc', ''), keywords):
+                if _desc_contains(attr.get('desc', ''), desc_keywords):
                     return attr
+            if en_keywords:
+                for attr in attributes:
+                    if _attr_name_matches(attr.get('name', ''), en_keywords):
+                        return attr
             return None
 
         def _on_off_values(attr):
@@ -298,24 +345,28 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             )
             yielded_keys.add(entity_key)
 
-        # ---- 1. 四季温水 / 自动关机 等二元开关 ----
-        for entity_suffix, display_name, keywords in _WATER_HEATER_BOOL_FEATURES:
-            attr = _find_attr(keywords)
+        # ---- 1. 四季温水 / 自动关机 / 中温保温 / 智能抑菌 等二元开关 ----
+        for entity_suffix, display_name, desc_keywords, en_keywords in _WATER_HEATER_BOOL_FEATURES:
+            attr = _find_attr(desc_keywords, en_keywords)
             if not attr:
-                _LOGGER.debug('water heater feature %s not found (keywords=%s)', display_name, keywords)
+                _LOGGER.warning('water heater feature [%s] not found (cn=%s, en=%s)',
+                                display_name, desc_keywords, en_keywords)
                 continue
             entity_key = attr['name']  # 用原始字段名，方便和默认解析流程对齐
-            # 跳过已经作为正常switch解析的（智能抑菌会走正常路径）
+            # 跳过已经作为正常switch解析的（可写且已被默认流程识别为bool）
             if attr.get('writable') and V1SpecAttributeParser._is_binary_attribute(attr):
+                # 如果已经是正常switch，且当前字段是"中温保温"，把已有的开关改名为"四季温水"
+                # （有些机型中温保温/四季温水共用一个字段，按用户看到的中文名显示）
+                continue
+            # 避免重复生成（智能抑菌可能已被下面按钮或switch处理过）
+            if entity_key in yielded_keys:
                 continue
             yield from _yield_switch(attr, entity_key, display_name)
 
-        # ---- 2. 智能抑菌：若被云端标记为只读LIST，按按钮生成（单次触发） ----
-        sterilization = _find_attr(['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'])
-        if sterilization is not None and not (
-                sterilization.get('writable')
-                and V1SpecAttributeParser._is_binary_attribute(sterilization)):
-            # 判断是不是"单次触发"（dataList只有1项或 desc 里含"一次"）
+        # ---- 2. 智能抑菌：若未通过上面的开关生成，检查是否为单次触发按钮 ----
+        sterilization = _find_attr(['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'],
+                                   ['sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril'])
+        if sterilization is not None and sterilization['name'] not in yielded_keys:
             desc = sterilization.get('desc', '')
             vr = sterilization.get('valueRange', {})
             is_one_shot = ('一次' in desc) or (
@@ -342,14 +393,30 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         #   预约1时间小时 (STEP 0-23)
         #   预约1时间分钟 (STEP 0-59)
         #   预约1温度 (STEP 35-75，部分机型)
+        # 部分机型还可能用英文名：timer*, reserve*, appoint*, schedule*, timed*
         for i in range(1, _MAX_RESERVATION_SLOTS + 1):
             prefixes = [f'预约{i}', f'预约{i}号', f'定时{i}', f'定时{i}号']
+            # 英文名前缀（timer1/reserve1/appoint1/schedule1/timing1/timed1）
+            en_prefixes = [f'timer{i}', f'reserve{i}', f'reservation{i}',
+                           f'appoint{i}', f'schedule{i}', f'timing{i}', f'timed{i}']
             slot_attrs = {}
             for attr in attributes:
                 desc = attr.get('desc', '')
+                name = attr.get('name', '').lower().replace('_', '')
+                # 中文前缀匹配
+                matched = False
                 for p in prefixes:
                     if desc.startswith(p):
                         slot_attrs[desc] = attr
+                        matched = True
+                        break
+                if matched:
+                    continue
+                # 英文名前缀匹配（不区分大小写/下划线）
+                for ep in en_prefixes:
+                    ep_clean = ep.lower().replace('_', '')
+                    if name.startswith(ep_clean):
+                        slot_attrs[desc or name] = attr
                         break
 
             if not slot_attrs:
@@ -519,12 +586,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         用于在 parse_attribute 阶段直接跳过只读副本，避免出现 switch+binary_sensor 同名双胞胎。
         """
         desc = attribute.get('desc', '')
-        if not desc:
-            return False
-        for kw in _WH_FORCE_WRITABLE_BOOL_KWS:
-            if kw in desc:
+        name = attribute.get('name', '')
+        if desc:
+            for kw in _WH_FORCE_WRITABLE_BOOL_KWS:
+                if kw in desc:
+                    return True
+        if name:
+            if _attr_name_matches(name, _WH_FORCE_WRITABLE_EN_KWS):
                 return True
-        if _is_wh_reservation(desc):
+        if desc and _is_wh_reservation(desc):
             return True
         return False
 
@@ -707,12 +777,28 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
     @staticmethod
     def _is_binary_attribute(attribute):
-        valueRange = attribute['valueRange']
-
-        return (equals_ignore_case(valueRange['type'], 'LIST')
-                and len(valueRange['dataList']) == 2
-                and contains_any_ignore_case(valueRange['dataList'][0]['data'], ['true', 'false'])
-                and contains_any_ignore_case(valueRange['dataList'][1]['data'], ['true', 'false']))
+        valueRange = attribute.get('valueRange', {})
+        if not equals_ignore_case(valueRange.get('type'), 'LIST'):
+            return False
+        data_list = valueRange.get('dataList', [])
+        if len(data_list) != 2:
+            return False
+        # 识别二元字段：true/false、1/0、开/关 三种形式都算
+        values = []
+        for item in data_list:
+            d = item.get('data')
+            desc = str(item.get('desc', ''))
+            d_str = str(d).lower()
+            if d_str in ('true', 'false', '1', '0'):
+                values.append(d)
+            elif '开' in desc or '关' in desc or '启用' in desc or '禁用' in desc:
+                values.append(d)
+        # 只要能提取到两个值（通常是true/false 或 1/0 或 开/关）就算二元
+        if len(values) == 2:
+            return True
+        # 兼容原逻辑：只要两个值都包含true/false字符串
+        return (contains_any_ignore_case(data_list[0]['data'], ['true', 'false'])
+                and contains_any_ignore_case(data_list[1]['data'], ['true', 'false']))
 
     @staticmethod
     def _guess_state_class_device_class_and_unit(attribute) -> (str, str, str):
