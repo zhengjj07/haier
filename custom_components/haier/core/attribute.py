@@ -371,18 +371,19 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         _FALLBACK_FIELDS = {
             'auto_off': {
                 # 自动关机候选字段列表（按命中概率从高到低排列）。
-                # 用户机器的 bool 字段命名风格：sterilizationStatus /
-                # heatKeepingStatus / resn1RunningStatus / onOffStatus ——
-                # 都是短驼峰+Status，所以 autoOffStatus 概率最高。
+                # 用户机器 bool 字段命名风格：sterilizationStatus /
+                # heatKeepingStatus / resn1RunningStatus / onOffStatus / resn1CycleStatus。
+                # 1.3.10 调整：实测 autoOffStatus=1/0 命令能下发但到达设定温度未停机，
+                # 说明该字段名云端不识别（可能是个状态回显字段而非命令字段）。
+                # 优先试 U+ 协议中"加热完成自动断电"完整命名。
                 'candidates': [
-                    'autoOffStatus',          # 短驼峰+Status（最符合本机风格）
-                    'autoPowerOffStatus',     # 完整词+Status
-                    'autoShutDownStatus',     # Shutdown变体
+                    'autoPowerOffStatus',     # 自动断电关机（U+标准完整命名）
+                    'autoShutDownStatus',     # Shutdown 变体
                     'autoStopStatus',         # 自动停止
-                    'autoPowerStatus',        # 自动电源
                     'heatCompleteOffStatus',  # 加热完成关机
                     'finishPowerOffStatus',   # 完成后关机
                     'powerOffAfterHeatStatus',# 加热后断电
+                    'autoPowerStatus',        # 自动电源
                 ],
                 'on': 1,
                 'off': 0,
@@ -752,9 +753,10 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             'target_temperature_step': float(data_step.get('step', 1))
         }
 
-        # 查找当前温度字段（电热水器常见：innerWaterTemp/waterTemp/inTemp）
+        # 查找当前温度字段（海尔电热水器最常见字段名：currentTemperature）
         current_temp_key = None
-        for ck in ['innerWaterTemp', 'waterTemp', 'inWaterTemp', 'currentTemp', 'actualTemp', 'temp']:
+        for ck in ['currentTemperature', 'currentTemp', 'innerWaterTemp', 'waterTemp',
+                   'inWaterTemp', 'actualTemp', 'realTemp', 'inTemp', 'temp']:
             if any(a['name'] == ck for a in attributes):
                 current_temp_key = ck
                 break
@@ -820,7 +822,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         }
 
         current_temp_key = None
-        for ck in ['currentTemp', 'inWaterTemp', 'waterTemp', 'innerWaterTemp', 'outWaterTemp', 'roomTemp']:
+        # currentTemperature 是海尔电热水器最常见的"当前温度"字段名，必须放第一位
+        for ck in ['currentTemperature', 'currentTemp', 'inWaterTemp', 'waterTemp',
+                   'innerWaterTemp', 'outWaterTemp', 'roomTemp', 'actualTemp', 'realTemp']:
             if any(a['name'] == ck for a in attributes):
                 current_temp_key = ck
                 break

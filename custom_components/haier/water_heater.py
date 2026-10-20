@@ -94,11 +94,18 @@ class HaierWaterHeater(HaierAbstractEntity, WaterHeaterEntity):
             except (ValueError, TypeError):
                 self._attr_current_temperature = None
         else:
-            if self._temp_key in attrs:
-                try:
-                    self._attr_current_temperature = float(attrs[self._temp_key])
-                except (ValueError, TypeError):
-                    self._attr_current_temperature = None
+            # 不在字段列表时，不再回退到目标温度（否则会显示"当前=目标"的假象）。
+            # 而是遍历常见的出水/进水/内胆温度字段兜底。
+            for fallback_key in ('outWaterTemp', 'innerWaterTemp', 'waterTemp',
+                                  'actualTemp', 'realTemp'):
+                if fallback_key in attrs:
+                    try:
+                        self._attr_current_temperature = float(attrs[fallback_key])
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            else:
+                self._attr_current_temperature = None
 
         if self._temp_key in attrs:
             try:
