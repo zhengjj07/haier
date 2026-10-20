@@ -363,24 +363,47 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         # ---- 1. 四季温水 / 自动关机 / 中温保温 / 智能抑菌 等二元开关 ----
         # 已知：自动关机在部分机型（如海尔电热水器EC系列）的数字模型里
         # 压根不返回该属性，但和抑菌/中温保温一样，WebSocket直接下发命令设备会响应。
-        # 因此当找不到匹配时，使用海尔U+协议该功能的标准字段名强制生成开关，
+        # 因此当找不到匹配时，使用海尔U+协议该功能的候选字段名按优先级逐一尝试。
+        # 候选字段按海尔电热水器命名规律（短驼峰 + Status）排列，最可能命中的放前面。
         # 默认on=1 / off=0（与同机型其他bool字段保持一致）。
         # 注意：四季温水不再使用虚拟字段，因为它在本机上是真实存在的字段
         # （heatKeepingStatus / desc=中温保温功能状态），已由上面的关键词匹配命中。
         _FALLBACK_FIELDS = {
-            'auto_off':    ('autoPowerOffStatus', 1, 0), # 自动关机：最常用字段名
+            'auto_off': {
+                # 自动关机候选字段列表（按命中概率从高到低排列）。
+                # 用户机器的 bool 字段命名风格：sterilizationStatus /
+                # heatKeepingStatus / resn1RunningStatus / onOffStatus ——
+                # 都是短驼峰+Status，所以 autoOffStatus 概率最高。
+                'candidates': [
+                    'autoOffStatus',          # 短驼峰+Status（最符合本机风格）
+                    'autoPowerOffStatus',     # 完整词+Status
+                    'autoShutDownStatus',     # Shutdown变体
+                    'autoStopStatus',         # 自动停止
+                    'autoPowerStatus',        # 自动电源
+                    'heatCompleteOffStatus',  # 加热完成关机
+                    'finishPowerOffStatus',   # 完成后关机
+                    'powerOffAfterHeatStatus',# 加热后断电
+                ],
+                'on': 1,
+                'off': 0,
+            },
         }
         for entity_suffix, display_name, desc_keywords, en_keywords in _WATER_HEATER_BOOL_FEATURES:
             attr = _find_attr(desc_keywords, en_keywords)
             if not attr:
-                # 属性列表里找不到 → 用 fallback 字段名强制生成
+                # 属性列表里找不到 → 用 fallback 候选字段名强制生成开关
                 if entity_suffix in _FALLBACK_FIELDS:
-                    fb_name, fb_on, fb_off = _FALLBACK_FIELDS[entity_suffix]
+                    fb = _FALLBACK_FIELDS[entity_suffix]
+                    candidates = fb['candidates']
+                    # 默认用第一个（命中概率最高的）
+                    fb_name = candidates[0]
+                    fb_on, fb_off = fb['on'], fb['off']
                     _LOGGER.warning(
                         'water heater feature [%s] not in attribute list, '
-                        'fallback to field "%s" (on=%s, off=%s) —— 如果点击后设备无响应，'
-                        '请在海尔智家APP里操作一次该功能，同时抓包确认真实字段名后告知维护者',
-                        display_name, fb_name, fb_on, fb_off
+                        'fallback to field "%s" (on=%s, off=%s). '
+                        '候选字段列表（按优先级）：%s。点击开关后如果设备没反应，'
+                        '请查看日志中 "Sending fallback command" 的回执信息',
+                        display_name, fb_name, fb_on, fb_off, candidates
                     )
                     # 构造一个"虚拟 attr"交给 _yield_switch
                     virtual_attr = {
@@ -393,7 +416,15 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                             {'data': fb_off, 'desc': '关'},
                         ]},
                     }
-                    yield from _yield_switch(virtual_attr, fb_name, display_name)
+                    # 生成 HaierAttribute 时把 fallback 信息写进 ext
+                    # （供 switch.py 发送命令时打日志、尝试多字段）
+                    attr_obj = list(_yield_switch(virtual_attr, fb_name, display_name))
+                    # _yield_switch 里 yielded_keys.add 已经执行，这里直接取实体
+                    if attr_obj:
+                        ha = attr_obj[0]
+                        ha.ext['fallback_candidates'] = candidates
+                        ha.ext['fallback_current'] = fb_name
+                        yield ha
                 else:
                     _LOGGER.warning('water heater feature [%s] not found (cn=%s, en=%s)',
                                     display_name, desc_keywords, en_keywords)
