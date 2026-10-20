@@ -4,7 +4,7 @@
 并已按 [HACS 官方对集成仓库的规范](https://www.hacs.xyz/docs/publish/integration/) 组织好目录结构，
 可作为 **HACS 自定义仓库**安装。
 
-在原版 1.3.0 上增加热水器「设定目标水温、切换加热模式」
+在原版 1.3.0 上增加电热水器「设定目标水温、切换加热模式、预约用水、四季恒温功能开关」
 
 - 上游项目：https://github.com/banto6/haier
 - 反馈问题时请附上：热水器型号、`.storage/haier/device_<deviceId>.json` 缓存内容（可脱敏）、
