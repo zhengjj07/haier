@@ -26,12 +26,6 @@ _WATER_HEATER_BOOL_FEATURES = [
      ['四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温', '中温保温', '中温恒温'],
      ['seasontemp', 'season_temp', 'fourseason', 'constanttemp',
       'midtempkeep', 'mid_temp_keep', 'mediumtempkeep', 'insulation']),
-    ('auto_off', '自动关机',
-     ['自动关机', '自动断电', '加热完成自动', '加热完成后自动', '加热完成后关机',
-      '加热后自动', '完成后关机', '完成后自动', '自动停机', '加热完毕', '加热结束'],
-     ['autopoweroff', 'autoshutdown', 'autooff', 'autostop', 'heatcompleteauto',
-      'heatautopoweroff', 'finishautopoweroff', 'poweroffafterheat', 'heatcomplete',
-      'auto_power_off', 'heat_complete_auto', 'complete_auto_off', 'automaticshutdown']),
     ('sterilization', '智能抑菌',
      ['智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌'],
      ['sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril']),
@@ -44,11 +38,8 @@ _MAX_RESERVATION_SLOTS = 4
 # 但后续会被热水器增强逻辑升级为可写实体"的字段，直接跳过只读副本，
 # 避免 HA 里出现同名"双胞胎"（一个 switch + 一个 binary_sensor/sensor）。
 _WH_FORCE_WRITABLE_BOOL_KWS = [
-    # 四季温水
+    # 四季温水（本机实际字段为 heatKeepingStatus，desc=中温保温功能状态）
     '四季温水', '四季恒温', '四季温感', '恒温保温', '智能保温',
-    # 自动关机
-    '自动关机', '自动断电', '加热完成自动', '加热完成后自动', '加热完成后关机',
-    '加热后自动', '完成后关机', '完成后自动', '自动停机', '加热完毕', '加热结束',
     # 智能抑菌
     '智能抑菌', '抑菌', '杀菌', '除菌', '灭菌', '抗菌',
     # 中温保温
@@ -58,9 +49,6 @@ _WH_FORCE_WRITABLE_BOOL_KWS = [
 # 英文名（name 字段）关键词，用于部分机型 desc 为英文/通用命名时也能识别
 _WH_FORCE_WRITABLE_EN_KWS = [
     'seasontemp', 'season_temp', 'fourseason', 'constanttemp', 'midtempkeep',
-    'autopoweroff', 'autoshutdown', 'autooff', 'autostop', 'heatcomplete',
-    'autopower', 'poweroffafter', 'heatcompleteauto', 'heatautopoweroff',
-    'finishautopoweroff', 'completeautopoweroff', 'auto_power_off',
     'sterilization', 'sterilize', 'bacteriostasis', 'antibacterial', 'steril',
 ]
 
@@ -139,7 +127,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
     def parse_attribute(self, attribute: dict) -> HaierAttribute:
         # —— 热水器增强字段黑名单（必须放在 'value' not in attribute 判断之前）：
-        # 有些字段（如四季温水、自动关机）在部分机型上云端根本不下发 value 字段，
+        # 有些字段（如四季温水/中温保温）在部分机型上云端根本不下发 value 字段，
         # 只有描述，此时后面的增强逻辑（parse_global）会为它们单独生成可操作实体。
         # 这里直接跳过默认的只读副本，避免 HA 里出现残缺的 binary_sensor。
         if self._is_water_heater_forced_writable(attribute):
@@ -181,18 +169,17 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
         is_water_heater = any(key in all_attribute_keys for key in
                               ('targetTemp', 'targetTemperature')) and 'onOffStatus' in all_attribute_keys
 
-        # —— 热水器全属性 dump（WARNING 级别）：
-        # 默认日志就会打印该热水器数字模型里每一个属性的 name / desc / writable /
-        # readable / value / valueRange 类型，方便排查"某个功能为何没有出现"。
-        # 无需开 debug，直接在 HA 日志页搜 haier 即可看到。
+        # —— 热水器全属性 dump（DEBUG 级别，默认不输出）：
+        # 仅在把 haier 的日志级别手动设为 debug 时才会打印该热水器数字模型里
+        # 每个属性的 name / desc / writable / readable / value / rangeType，
+        # 用于排查"某个功能为何没有出现"。默认运行日志不再输出任何调试内容。
         if is_water_heater:
-            # 尝试从属性里提取 deviceId（attributes[0] 可能不带，需遍历找）
             device_id_marker = ''
             for a in attributes:
                 if a.get('deviceId'):
                     device_id_marker = a['deviceId']
                     break
-            _LOGGER.warning('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
+            _LOGGER.debug('=== Haier water heater attribute dump (device=%s) ===', device_id_marker)
             for a in attributes:
                 name = a.get('name', '')
                 desc = a.get('desc', '')
@@ -201,11 +188,11 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                 value = a.get('value', '<no value>')
                 vr = a.get('valueRange', {})
                 vr_type = vr.get('type', '') if vr else ''
-                _LOGGER.warning(
+                _LOGGER.debug(
                     '  attr: name=%-32s desc=%-24s writable=%s readable=%s value=%s rangeType=%s',
                     name, desc, writable, readable, value, vr_type
                 )
-            _LOGGER.warning('=== End attribute dump ===')
+            _LOGGER.debug('=== End attribute dump ===')
 
         # 空调特征字段
         climate_feature_fields = [
@@ -276,10 +263,9 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
 
         # —— 热水器增强实体 ——
         # 基于中文 desc 匹配来强制生成可操作实体，覆盖：
-        #   * 四季温水开关
-        #   * 自动关机开关（加热完成后关机）
-        #   * 智能抑菌按钮（单次触发）
-        #   * 预约启停/循环开关、预约小时/分钟/温度Number
+        #   * 四季温水开关（本机实际字段 heatKeepingStatus）
+        #   * 智能抑菌按钮/开关
+        #   * 预约启停开关、预约小时/分钟/温度 Number
         # 这些字段在部分机型上被云端标记为 writable=false，默认流程会
         # 把它们当成 Sensor，但实际控制命令依然可以下发。
         if is_water_heater:
@@ -340,7 +326,7 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
                     return '1', '0'
                 if raw.lower() in ('true', 'false'):
                     return 'true', 'false'
-            # 字段没有 value（如部分机型的四季温水/自动关机），也没有 dataList，
+            # 字段没有 value（如部分机型的四季温水/中温保温），也没有 dataList，
             # 海尔电热水器的二元功能普遍用 1/0 控制，默认用 1/0 比 True/False 更兼容。
             return 1, 0
 
@@ -360,75 +346,14 @@ class V1SpecAttributeParser(HaierAttributeParser, ABC):
             )
             yielded_keys.add(entity_key)
 
-        # ---- 1. 四季温水 / 自动关机 / 中温保温 / 智能抑菌 等二元开关 ----
-        # 已知：自动关机在部分机型（如海尔电热水器EC系列）的数字模型里
-        # 压根不返回该属性，但和抑菌/中温保温一样，WebSocket直接下发命令设备会响应。
-        # 因此当找不到匹配时，使用海尔U+协议该功能的候选字段名按优先级逐一尝试。
-        # 候选字段按海尔电热水器命名规律（短驼峰 + Status）排列，最可能命中的放前面。
-        # 默认on=1 / off=0（与同机型其他bool字段保持一致）。
-        # 注意：四季温水不再使用虚拟字段，因为它在本机上是真实存在的字段
-        # （heatKeepingStatus / desc=中温保温功能状态），已由上面的关键词匹配命中。
-        _FALLBACK_FIELDS = {
-            'auto_off': {
-                # 自动关机候选字段列表（按命中概率从高到低排列）。
-                # 用户机器 bool 字段命名风格：sterilizationStatus /
-                # heatKeepingStatus / resn1RunningStatus / onOffStatus / resn1CycleStatus。
-                # 1.3.10 调整：实测 autoOffStatus=1/0 命令能下发但到达设定温度未停机，
-                # 说明该字段名云端不识别（可能是个状态回显字段而非命令字段）。
-                # 优先试 U+ 协议中"加热完成自动断电"完整命名。
-                'candidates': [
-                    'autoPowerOffStatus',     # 自动断电关机（U+标准完整命名）
-                    'autoShutDownStatus',     # Shutdown 变体
-                    'autoStopStatus',         # 自动停止
-                    'heatCompleteOffStatus',  # 加热完成关机
-                    'finishPowerOffStatus',   # 完成后关机
-                    'powerOffAfterHeatStatus',# 加热后断电
-                    'autoPowerStatus',        # 自动电源
-                ],
-                'on': 1,
-                'off': 0,
-            },
-        }
-        for entity_suffix, display_name, desc_keywords, en_keywords in _WATER_HEATER_BOOL_FEATURES:
+        # ---- 1. 四季温水 / 中温保温 / 智能抑菌 等二元开关 ----
+        # 这些功能在部分机型上被云端标记为 writable=false，默认解析流程会把它们
+        # 当成只读 Sensor，甚至因为没有 value 字段而直接丢弃；但实际控制命令
+        # 依然可以下发，因此这里统一强制升级为可操作的开关实体。
+        for _suffix, display_name, desc_keywords, en_keywords in _WATER_HEATER_BOOL_FEATURES:
             attr = _find_attr(desc_keywords, en_keywords)
             if not attr:
-                # 属性列表里找不到 → 用 fallback 候选字段名强制生成开关
-                if entity_suffix in _FALLBACK_FIELDS:
-                    fb = _FALLBACK_FIELDS[entity_suffix]
-                    candidates = fb['candidates']
-                    # 默认用第一个（命中概率最高的）
-                    fb_name = candidates[0]
-                    fb_on, fb_off = fb['on'], fb['off']
-                    _LOGGER.warning(
-                        'water heater feature [%s] not in attribute list, '
-                        'fallback to field "%s" (on=%s, off=%s). '
-                        '候选字段列表（按优先级）：%s。点击开关后如果设备没反应，'
-                        '请查看日志中 "Sending fallback command" 的回执信息',
-                        display_name, fb_name, fb_on, fb_off, candidates
-                    )
-                    # 构造一个"虚拟 attr"交给 _yield_switch
-                    virtual_attr = {
-                        'name': fb_name,
-                        'desc': display_name,
-                        'value': 0,  # 默认显示关闭
-                        'writable': True,
-                        'valueRange': {'type': 'LIST', 'dataList': [
-                            {'data': fb_on, 'desc': '开'},
-                            {'data': fb_off, 'desc': '关'},
-                        ]},
-                    }
-                    # 生成 HaierAttribute 时把 fallback 信息写进 ext
-                    # （供 switch.py 发送命令时打日志、尝试多字段）
-                    attr_obj = list(_yield_switch(virtual_attr, fb_name, display_name))
-                    # _yield_switch 里 yielded_keys.add 已经执行，这里直接取实体
-                    if attr_obj:
-                        ha = attr_obj[0]
-                        ha.ext['fallback_candidates'] = candidates
-                        ha.ext['fallback_current'] = fb_name
-                        yield ha
-                else:
-                    _LOGGER.warning('water heater feature [%s] not found (cn=%s, en=%s)',
-                                    display_name, desc_keywords, en_keywords)
+                # 该机型不具备此功能，静默跳过（不输出任何日志）
                 continue
             entity_key = attr['name']  # 用原始字段名，方便和默认解析流程对齐
             # 跳过已经作为正常switch解析的（可写且已被默认流程识别为bool）

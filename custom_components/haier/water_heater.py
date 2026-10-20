@@ -80,7 +80,7 @@ class HaierWaterHeater(HaierAbstractEntity, WaterHeaterEntity):
     def set_temperature(self, **kwargs) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE) or kwargs.get('temperature')
         if temperature is None:
-            _LOGGER.warning('set_temperature called without temperature value')
+            _LOGGER.debug('set_temperature called without temperature value')
             return
         _LOGGER.debug('Setting water heater temperature to %s via key %s', temperature, self._temp_key)
         self._send_command({self._temp_key: temperature})
