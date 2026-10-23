@@ -15,4 +15,3 @@
 ## 安装
 1. 把 `custom_components/haier` 放到配置目录，或通过 HACS 添加自定义仓库。
 2. 重启 HA。
-3. **删除旧 Haier 集成再重新添加**
